@@ -6,22 +6,11 @@ import (
 	"os"
 	Path "path"
 	"runtime"
-	"strconv"
-	"strings"
-	"sync"
 	"syscall"
 	"unsafe"
+	"strconv"
 )
 
-type Constor struct {
-	sync.Mutex
-	rootfs    string
-	logf	  *os.File
-	inodemap  *Inodemap
-	dentrymap *Dentrymap
-	fdmap     map[uintptr]*FD
-	layers    []string
-}
 
 func (constor *Constor) log(format string, a ...interface{}) {
 	pc, file, line, _ := runtime.Caller(1)
@@ -88,210 +77,172 @@ func Lsetxattr(path string, attr string, data []byte, flags int) error {
 	return nil
 }
 
-func (constor *Constor) getLayer(path string) int {
-	for i, l := range constor.layers {
-		pathl := Path.Join(l, path)
-		if constor.isdeleted(pathl) {
-			return -1
-		}
-		if _, err := os.Lstat(pathl); err == nil {
-			return i
-		}
-	}
-	return -1
-}
-
-func (constor *Constor) getPath(ino uint64) (string, error) {
-	path, err := constor.dentrymap.getPath(ino)
-	if err != nil {
-		return path, err
-	}
-	inode, err := constor.inodemap.findInode(ino)
-	if err != nil {
-		return "", err
-	}
-	if inode.layer != -1 {
-		return Path.Join(constor.layers[inode.layer], path), nil
-	}
-	li := constor.getLayer(path)
-	if li == -1 {
-		return "", syscall.ENOENT
-	}
-	inode.layer = li
-	return Path.Join(constor.layers[li], path), nil
-}
-
-func (constor *Constor) getPathName(ino uint64, name string) (string, error) {
-	path, err := constor.getPath(ino)
-	if err != nil {
-		return "", err
-	}
-	return Path.Join(path, name), nil
-}
-
-func (constor *Constor) LstatInode(path string, stat *syscall.Stat_t, inode *Inode) error {
-	li := inode.layer
-	if li == -1 {
-		li = constor.getLayer(path)
-		if li == -1 {
-			return syscall.ENOENT
-		}
-		inode.layer = li
-	}
-	pathl := Path.Join(constor.layers[li], path)
-	err := syscall.Lstat(pathl, stat)
-	if err != nil {
-		return err
-	}
-	if li != 0 {
-		// INOXATTR valid only for layer-0
-		return nil
-	}
-	// var inobyte []byte
-	// inobyte = make([]byte, 100, 100)
-	// size, err := syscall.Getxattr(pathl, INOXATTR, inobyte)
-	inobyte, err := Lgetxattr(pathl, INOXATTR)
-	if err != nil {
-		return nil
-	}
-	if len(inobyte) == 0 {
-		return nil
-	}
-	inostr := string(inobyte)
-	ino, err := strconv.Atoi(inostr)
-	if err != nil {
-		return err
-	}
-	stat.Ino = uint64(ino)
-	if inode.ino == 1 {
-		stat.Ino = 1
-	}
-	return nil
-}
-
-func (constor *Constor) Lstat(path string, stat *syscall.Stat_t) error {
-	li := constor.getLayer(path)
-	if li == -1 {
-		return syscall.ENOENT
-	}
-	pathl := Path.Join(constor.layers[li], path)
-	constor.log("%s", pathl)
-	err := syscall.Lstat(pathl, stat)
-	if err != nil {
-		return err
-	}
-	if li != 0 {
-		// INOXATTR valid only for layer-0
-		return nil
-	}
-
-	// var inobyte []byte
-	// inobyte = make([]byte, 100, 100)
-	// size, err := syscall.Getxattr(pathl, INOXATTR, inobyte)
-	inobyte, err := Lgetxattr(pathl, INOXATTR)
-	if err != nil {
-		return nil
-	}
-	if len(inobyte) == 0 {
-		return nil
-	}
-	inostr := string(inobyte)
-	ino, err := strconv.Atoi(inostr)
-	if err != nil {
-		return err
-	}
-	stat.Ino = uint64(ino)
-	if path == "/" {
-		stat.Ino = 1
-	}
-	return nil
-}
-
-func (constor *Constor) createPath(dirpath string) error {
-	dirs := strings.Split(dirpath, "/")
-	if len(dirs) == 0 {
-		return syscall.EIO
-	}
-	subdir := ""
-	for _, dir := range dirs {
-		if dir == "" {
-			continue
-		}
-		subdir = Path.Join(subdir, "/", dir)
-		li := constor.getLayer(subdir)
-		if li == 0 {
-			continue
-		}
-		if li == -1 {
-			return syscall.EIO
-		}
-		stat := syscall.Stat_t{}
-		if err := constor.Lstat(subdir, &stat); err != nil {
-			return err
-		}
-		subdirl := Path.Join(constor.layers[0], subdir)
-		if err := syscall.Mkdir(subdirl, stat.Mode); err != nil {
-			return err
-		}
-		if err := syscall.Chown(subdirl, int(stat.Uid), int(stat.Gid)); err != nil {
-			return err
-		}
-		if err := syscall.UtimesNano(subdirl, []syscall.Timespec{stat.Atim, stat.Mtim}); err != nil {
-			return err
-		}
-		inoitoa := strconv.Itoa(int(stat.Ino))
-		inobyte := []byte(inoitoa)
-		if err := syscall.Setxattr(subdirl, INOXATTR, inobyte, 0); err != nil {
-			return err
-		}
-		inode, err := constor.inodemap.findInode(stat.Ino)
+func (constor *Constor) inclinkscnt(id string) error {
+	count := 1
+	path := constor.getPath(0, id)
+	linksbyte, err := Lgetxattr(path, LINKSXATTR)
+	if err == nil && len(linksbyte) != 0 {
+		linksstr := string(linksbyte)
+		linksint, err :=  strconv.Atoi(linksstr)
 		if err != nil {
+			fmt.Println(err)
 			return err
 		}
-		inode.Lock()
-		inode.layer = 0
-		inode.Unlock()
+		count = linksint
 	}
-	return nil
+	count++
+	linksstr := strconv.Itoa(count)
+	linksbyte = []byte(linksstr)
+	err = Lsetxattr(path, LINKSXATTR, linksbyte, 0)
+	fmt.Println(err)
+	return err
 }
 
-func (constor *Constor) setdeleted(pathl string) error {
+func (constor *Constor) declinkscnt(id string) (int, error) {
+	count := 0
+	path := constor.getPath(0, id)
+	linksbyte, err := Lgetxattr(path, LINKSXATTR)
+	if err == nil && len(linksbyte) != 0 {
+		linksstr := string(linksbyte)
+		linksint, err :=  strconv.Atoi(linksstr)
+		if err != nil {
+			return 0, err
+		}
+		count = linksint
+	} else {
+		return 0, nil
+	}
+	count--
+	linksstr := strconv.Itoa(count)
+	linksbyte = []byte(linksstr)
+	err = Lsetxattr(path, LINKSXATTR, linksbyte, 0)
+	return count, err
+}
+
+func (constor *Constor) setdeleted(path string) error {
 	stat := syscall.Stat_t{}
-	err := syscall.Stat(pathl, &stat)
+	err := syscall.Stat(path, &stat)
 	if err != nil {
-		fd, err := syscall.Creat(pathl, 0)
+		fd, err := syscall.Creat(path, 0)
 		if err != nil {
 			return err
 		}
 		syscall.Close(fd)
 	}
-	return syscall.Setxattr(pathl, DELXATTR, []byte{49}, 0)
+	return syscall.Setxattr(path, DELXATTR, []byte{49}, 0)
 }
 
-func (constor *Constor) isdeleted(pathl string) bool {
+func (constor *Constor) isdeleted(path string) bool {
 	var inobyte []byte
 	inobyte = make([]byte, 100, 100)
-	if _, err := syscall.Getxattr(pathl, DELXATTR, inobyte); err == nil {
+	if _, err := syscall.Getxattr(path, DELXATTR, inobyte); err == nil {
 		return true
 	} else {
 		return false
 	}
 }
 
+func (constor *Constor) getLayer(id string) int {
+	for i, _ := range constor.layers {
+		path := constor.getPath(i, id)
+		if constor.isdeleted(path) {
+			return -1
+		}
+		if _, err := os.Lstat(path); err == nil {
+			return i
+		}
+	}
+	return -1
+}
+
+// func (constor *Constor) getPath(li int, id string) string {
+// 	return Path.Join(constor.layers[li], id[:2], id[2:4], id)
+// }
+
+func (constor *Constor) getPath(li int, id string) string {
+	return Path.Join(constor.layers[li], id)
+}
+
+func (constor *Constor) Lstat(li int, id string, stat *syscall.Stat_t) error {
+	path :=  constor.getPath(li, id)
+	if err := syscall.Lstat(path, stat); err != nil {
+		return err
+	}
+	count := 1
+	linksbyte, err := Lgetxattr(path, LINKSXATTR)
+	if err == nil && len(linksbyte) != 0 {
+		linksstr := string(linksbyte)
+		linksint, err :=  strconv.Atoi(linksstr)
+		if err != nil {
+			return err
+		}
+		count = linksint
+	}
+	stat.Nlink = uint64(count)
+	stat.Ino = idtoino(id)
+	return nil
+}
+
+func (constor *Constor) getid(li int, id string, name string) (string, error) {
+	if li != -1 {
+		dirpath := constor.getPath(li, id)
+		path := Path.Join(dirpath, name)
+		if constor.isdeleted(path) {
+			return "", syscall.ENOENT
+		}
+		inobyte, err := Lgetxattr(path, IDXATTR)
+		if err != nil || len(inobyte) == 0 {
+			return "", syscall.ENOENT
+		}
+		return string(inobyte), nil
+	}
+	for li, _ := range constor.layers {
+		dirpath := constor.getPath(li, id)
+		path := Path.Join(dirpath, name)
+		if constor.isdeleted(path) {
+			return "", syscall.ENOENT
+		}
+		inobyte, err := Lgetxattr(path, IDXATTR)
+		if err == nil {
+			if len(inobyte) == 0 {
+				return "", syscall.ENOENT
+			}
+			return string(inobyte), nil
+		}
+	}
+	return "", syscall.ENOENT
+}
+
+func (constor *Constor) setid(path string, id string) string {
+	if id == "" {
+		id = newuuid().String()
+	}
+	err := Lsetxattr(path, IDXATTR, []byte(id), 0)
+	if err == nil {
+		return id
+	} else {
+		return ""
+	}
+}
+
+func (constor *Constor) createPath(id string) error {
+	return nil
+	// path := Path.Join(constor.layers[0], id)
+	// return os.MkdirAll(path, 0770)
+}
+
 func (constor *Constor) copyup(inode *Inode) error {
-	src, err := constor.getPath(inode.ino)
-	if err != nil {
-		return err
+	if inode.layer == 0 {
+		return nil
 	}
-	dst, err := constor.dentrymap.getPath(inode.ino)
-	if err != nil {
-		return err
+	src := constor.getPath(inode.layer, inode.id)
+	if src == "" {
+		return syscall.EIO
 	}
-	err = constor.createPath(Path.Dir(dst))
-	if err != nil {
-		return err
+	dst := constor.getPath(0, inode.id)
+	if dst == "" {
+		return syscall.EIO
 	}
-	dst = Path.Join(constor.layers[0], dst)
 	fi, err := os.Lstat(src)
 	if err != nil {
 		return err
@@ -342,21 +293,20 @@ func (constor *Constor) copyup(inode *Inode) error {
 	if err = syscall.Lchown(dst, int(stat.Uid), int(stat.Gid)); err != nil {
 		return err
 	}
+	links, err := Lgetxattr(src, LINKSXATTR)
+	if err == nil && len(links) > 0 {
+		err := Lsetxattr(dst, LINKSXATTR, links, 0)
+		if err != nil {
+			return err
+		}
+	}
+
 	if fi.Mode()&os.ModeSymlink != os.ModeSymlink {
 		if err = syscall.UtimesNano(dst, []syscall.Timespec{stat.Atim, stat.Mtim}); err != nil {
 			return err
 		}
 	}
-	inoitoa := strconv.Itoa(int(stat.Ino))
-	inobyte := []byte(inoitoa)
-	// if err = syscall.Setxattr(dst, INOXATTR, inobyte, 0); err != nil {
-	// 	return err
-	// }
-	if err = Lsetxattr(dst, INOXATTR, inobyte, 0); err != nil {
-		return err
-	}
 	inode.layer = 0
-	path, err := constor.dentrymap.getPath(inode.ino)
-	constor.log("ino %d file %s", inode.ino, path)
+	constor.log("file %s", inode.id)
 	return nil
 }

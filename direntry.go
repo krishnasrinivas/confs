@@ -4,7 +4,6 @@ package main
 
 import (
 	"reflect"
-	"syscall"
 	"unsafe"
 
 	"github.com/hanwen/go-fuse/fuse"
@@ -33,7 +32,6 @@ type DirEntry struct {
 	Ino     uint64
 	Offset  uint64
 	Deleted bool
-	Stat    syscall.Stat_t
 }
 
 // func (d DirEntry) String() string {
