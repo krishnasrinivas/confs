@@ -6,6 +6,7 @@ import (
 )
 
 // FIXME: lock is not held whenever layer is modified
+// for now all this runs in single go routine so it's all fine
 
 type Inode struct {
 	nlookup uint64

@@ -8,6 +8,8 @@ type FD struct {
 	fd     int
 	flags  int
 	layer  int
+	pid    uint32
+	id     string
 	stream []DirEntry
 }
 
@@ -31,3 +33,15 @@ func (constor *Constor) deletefd(ptr uintptr) {
 	delete(constor.fdmap, ptr)
 }
 
+// FIXME: need to optimize this
+func (constor *Constor) fdlookup(id string, pid uint32) *FD {
+	constor.Lock()
+	defer constor.Unlock()
+
+	for _, F := range constor.fdmap {
+		if id == F.id && pid == F.pid {
+			return F
+		}
+	}
+	return nil
+}

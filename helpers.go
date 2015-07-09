@@ -13,6 +13,7 @@ import (
 
 
 func (constor *Constor) log(format string, a ...interface{}) {
+	return
 	pc, file, line, _ := runtime.Caller(1)
 	info := fmt.Sprintf(format, a...)
 	funcName := runtime.FuncForPC(pc).Name()
@@ -85,7 +86,7 @@ func (constor *Constor) inclinkscnt(id string) error {
 		linksstr := string(linksbyte)
 		linksint, err :=  strconv.Atoi(linksstr)
 		if err != nil {
-			fmt.Println(err)
+			constor.error("%s : %s", id, err)
 			return err
 		}
 		count = linksint
@@ -94,7 +95,10 @@ func (constor *Constor) inclinkscnt(id string) error {
 	linksstr := strconv.Itoa(count)
 	linksbyte = []byte(linksstr)
 	err = Lsetxattr(path, LINKSXATTR, linksbyte, 0)
-	fmt.Println(err)
+	if err != nil {
+		constor.error("%s : %s", id, err)
+		return err
+	}
 	return err
 }
 
@@ -106,6 +110,7 @@ func (constor *Constor) declinkscnt(id string) (int, error) {
 		linksstr := string(linksbyte)
 		linksint, err :=  strconv.Atoi(linksstr)
 		if err != nil {
+			constor.error("%s : %s", id, err)
 			return 0, err
 		}
 		count = linksint
@@ -120,22 +125,27 @@ func (constor *Constor) declinkscnt(id string) (int, error) {
 }
 
 func (constor *Constor) setdeleted(path string) error {
-	stat := syscall.Stat_t{}
-	err := syscall.Stat(path, &stat)
+	err := syscall.Mknod(path, syscall.S_IFCHR, 0)
 	if err != nil {
-		fd, err := syscall.Creat(path, 0)
+		err := syscall.Unlink(path)
 		if err != nil {
-			return err
+			constor.error("unable to rm %s %s", path, err)
 		}
-		syscall.Close(fd)
+		return syscall.Mknod(path, syscall.S_IFCHR, 0)
 	}
-	return syscall.Setxattr(path, DELXATTR, []byte{49}, 0)
+	return nil
 }
 
-func (constor *Constor) isdeleted(path string) bool {
-	var inobyte []byte
-	inobyte = make([]byte, 100, 100)
-	if _, err := syscall.Getxattr(path, DELXATTR, inobyte); err == nil {
+func (constor *Constor) isdeleted(path string, stat *syscall.Stat_t) bool {
+	if stat == nil {
+		stattmp := syscall.Stat_t{}
+		err := syscall.Lstat(path, &stattmp)
+		if err != nil {
+			return false
+		}
+		stat = &stattmp
+	}
+	if ((stat.Mode & syscall.S_IFMT) == syscall.S_IFCHR) && stat.Rdev == 0 {
 		return true
 	} else {
 		return false
@@ -145,7 +155,7 @@ func (constor *Constor) isdeleted(path string) bool {
 func (constor *Constor) getLayer(id string) int {
 	for i, _ := range constor.layers {
 		path := constor.getPath(i, id)
-		if constor.isdeleted(path) {
+		if constor.isdeleted(path, nil) {
 			return -1
 		}
 		if _, err := os.Lstat(path); err == nil {
@@ -155,11 +165,15 @@ func (constor *Constor) getLayer(id string) int {
 	return -1
 }
 
+// Use this function in case we have too many dirs/files in the layer's root
 // func (constor *Constor) getPath(li int, id string) string {
 // 	return Path.Join(constor.layers[li], id[:2], id[2:4], id)
 // }
 
 func (constor *Constor) getPath(li int, id string) string {
+	if li < 0 || li >= len(constor.layers) {
+		constor.error("%d %s", li, id)
+	}
 	return Path.Join(constor.layers[li], id)
 }
 
@@ -174,6 +188,7 @@ func (constor *Constor) Lstat(li int, id string, stat *syscall.Stat_t) error {
 		linksstr := string(linksbyte)
 		linksint, err :=  strconv.Atoi(linksstr)
 		if err != nil {
+			constor.error("%s : %s", id, err)
 			return err
 		}
 		count = linksint
@@ -187,7 +202,7 @@ func (constor *Constor) getid(li int, id string, name string) (string, error) {
 	if li != -1 {
 		dirpath := constor.getPath(li, id)
 		path := Path.Join(dirpath, name)
-		if constor.isdeleted(path) {
+		if constor.isdeleted(path, nil) {
 			return "", syscall.ENOENT
 		}
 		inobyte, err := Lgetxattr(path, IDXATTR)
@@ -199,7 +214,7 @@ func (constor *Constor) getid(li int, id string, name string) (string, error) {
 	for li, _ := range constor.layers {
 		dirpath := constor.getPath(li, id)
 		path := Path.Join(dirpath, name)
-		if constor.isdeleted(path) {
+		if constor.isdeleted(path, nil) {
 			return "", syscall.ENOENT
 		}
 		inobyte, err := Lgetxattr(path, IDXATTR)
@@ -227,11 +242,13 @@ func (constor *Constor) setid(path string, id string) string {
 
 func (constor *Constor) createPath(id string) error {
 	return nil
+	// do this in case we have too many dirs/files in the layer's root
 	// path := Path.Join(constor.layers[0], id)
 	// return os.MkdirAll(path, 0770)
 }
 
 func (constor *Constor) copyup(inode *Inode) error {
+	constor.log("%s", inode.id)
 	if inode.layer == 0 {
 		return nil
 	}
@@ -307,6 +324,6 @@ func (constor *Constor) copyup(inode *Inode) error {
 		}
 	}
 	inode.layer = 0
-	constor.log("file %s", inode.id)
+	constor.log("done", inode.id)
 	return nil
 }
